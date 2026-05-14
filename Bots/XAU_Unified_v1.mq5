@@ -5,11 +5,18 @@
 //|  Trade mgmt: partial take-profit (ATR) + breakeven + ATR trail   |
 //+------------------------------------------------------------------+
 #property copyright "XAU Unified"
-#property version   "1.00"
-#property description "XAUUSD unified EA — filters + partial + BE + trail"
+#property version   "1.01"
+#property description "XAUUSD unified EA — M5 profiles + partial + BE + trail"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
+
+enum ENUM_SIGNAL_PROFILE
+  {
+   PROFILE_M5_MODERATE = 0, // H4 trend + M5 momentum — moderate trade count
+   PROFILE_M5_FREQUENT = 1, // H4 + M5 EMA cross — higher trade count
+   PROFILE_STRICT      = 2  // H1 pullback + candle pattern — fewer trades
+  };
 
 CTrade         trade;
 CPositionInfo  posInfo;
@@ -62,16 +69,23 @@ input bool     UseNewsFilter      = true;
 input int      NewsMinutesBefore  = 30;
 input int      NewsMinutesAfter   = 30;
 
-input group "=== Signal — trend & pullback ==="
-input int      H4_EMA_Period      = 200;
-input int      H1_EMA_Period      = 21;
-input double   Pullback_ATRMult   = 0.45;       // max |close-H1EMA| on H1 vs ATR(H1)
-input int      M5_EMA_Fast        = 8;
-input int      M5_EMA_Slow        = 21;
-input int      M5_RSI_Period      = 7;
-input double   M5_RSI_Neutral     = 50.0;
-input int      ADX_Period         = 14;
-input double   ADX_Min            = 18.0;
+input group "=== Signal — M5 profile & HTF trend ==="
+input ENUM_SIGNAL_PROFILE SignalProfile = PROFILE_M5_MODERATE;
+input int      MinM5BarsBetweenTrades = 2;     // min full M5 bars between new entries
+input int      MaxTradesPerDay        = 0;     // 0 = no cap; else max new entries / GMT day
+input bool     UseH1PullbackFilter    = false; // if true: H1 must be near EMA21 (like strict)
+input bool     RequireM5CandlePattern = false; // if true: need engulfing/pin on M5
+input bool     UseADXFilter           = true;
+input ENUM_TIMEFRAMES ADX_Timeframe   = PERIOD_M5;
+input int      H4_EMA_Period          = 200;
+input int      H1_EMA_Period        = 21;
+input double   Pullback_ATRMult     = 0.45;    // with UseH1PullbackFilter: max |H1 close-EMA| vs ATR(H1)
+input int      M5_EMA_Fast          = 8;
+input int      M5_EMA_Slow          = 21;
+input int      M5_RSI_Period        = 7;
+input double   M5_RSI_Neutral       = 50.0;
+input int      ADX_Period           = 14;
+input double   ADX_MinLevel         = 16.0;    // with UseADXFilter on ADX_Timeframe (strict uses H1)
 
 input group "=== EA ==="
 input ulong    MagicNumber        = 202505141;
@@ -86,6 +100,9 @@ datetime       gLastM5Bar         = 0;
 double         gDayStartBalance   = 0;
 datetime       gLastDayCheck      = 0;
 bool           gDailyPaused       = false;
+datetime       gLastEntryM5BarTime = 0;
+int            gTradesToday       = 0;
+int            gTradeDayId        = 0;         // yyyymmdd GMT
 
 struct TradeState
 {
@@ -321,27 +338,107 @@ bool IsBearM5()
 }
 
 //+------------------------------------------------------------------+
-// Return 1 = buy, -1 = sell, 0 = none
-int GetSignal()
+void BumpTradeDayIfNeeded()
+{
+   MqlDateTime t;
+   TimeToStruct(TimeGMT(), t);
+   int id = t.year * 10000 + t.mon * 100 + t.day;
+   if(gTradeDayId != id)
+   {
+      gTradeDayId  = id;
+      gTradesToday = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+bool EntryCooldownOk()
+{
+   if(MinM5BarsBetweenTrades <= 0) return true;
+   if(gLastEntryM5BarTime == 0) return true;
+   int sh = iBarShift(gSym, PERIOD_M5, gLastEntryM5BarTime, false);
+   if(sh < 0) return true;
+   return (sh >= MinM5BarsBetweenTrades);
+}
+
+//+------------------------------------------------------------------+
+double GetADXValue(const ENUM_TIMEFRAMES tf)
+{
+   if(!UseADXFilter) return 999.0;
+   int adxH = iADX(gSym, tf, ADX_Period);
+   if(adxH == INVALID_HANDLE) return 0;
+   double adx[];
+   ArraySetAsSeries(adx, true);
+   if(CopyBuffer(adxH, 0, 1, 2, adx) < 2) { IndicatorRelease(adxH); return 0; }
+   IndicatorRelease(adxH);
+   return adx[0];
+}
+
+//+------------------------------------------------------------------+
+bool H4Trend(bool &bull, bool &bear)
+{
+   int h4 = iMA(gSym, PERIOD_H4, H4_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   if(h4 == INVALID_HANDLE) return false;
+   double e4[];
+   ArraySetAsSeries(e4, true);
+   if(CopyBuffer(h4, 0, 1, 2, e4) < 1) { IndicatorRelease(h4); return false; }
+   IndicatorRelease(h4);
+   double c4 = iClose(gSym, PERIOD_H4, 1);
+   bull = c4 > e4[0];
+   bear = c4 < e4[0];
+   return true;
+}
+
+//+------------------------------------------------------------------+
+bool H1PullbackOk(const bool forBuy)
+{
+   double atrH1 = ATR_H1();
+   if(atrH1 <= 0) return false;
+   int h1e = iMA(gSym, PERIOD_H1, H1_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   if(h1e == INVALID_HANDLE) return false;
+   double e1[];
+   ArraySetAsSeries(e1, true);
+   if(CopyBuffer(h1e, 0, 1, 2, e1) < 1) { IndicatorRelease(h1e); return false; }
+   IndicatorRelease(h1e);
+   double c1h = iClose(gSym, PERIOD_H1, 1);
+   double dist = MathAbs(c1h - e1[0]);
+   if(dist > Pullback_ATRMult * atrH1) return false;
+   if(forBuy)  return (c1h > e1[0]);
+   return (c1h < e1[0]);
+}
+
+//+------------------------------------------------------------------+
+bool LoadM5Core(double &bf[], double &bs[], double &r[])
+{
+   ArrayResize(bf, 2);
+   ArrayResize(bs, 2);
+   ArrayResize(r, 2);
+   ArraySetAsSeries(bf, true);
+   ArraySetAsSeries(bs, true);
+   ArraySetAsSeries(r, true);
+   int emaF = iMA(gSym, PERIOD_M5, M5_EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   int emaS = iMA(gSym, PERIOD_M5, M5_EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   int rsiH = iRSI(gSym, PERIOD_M5, M5_RSI_Period, PRICE_CLOSE);
+   if(emaF == INVALID_HANDLE || emaS == INVALID_HANDLE || rsiH == INVALID_HANDLE) return false;
+   if(CopyBuffer(emaF, 0, 1, 2, bf) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return false; }
+   if(CopyBuffer(emaS, 0, 1, 2, bs) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return false; }
+   if(CopyBuffer(rsiH, 0, 1, 2, r) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return false; }
+   IndicatorRelease(emaF);
+   IndicatorRelease(emaS);
+   IndicatorRelease(rsiH);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+int GetSignalStrict()
 {
    double atr = ATRValue();
    if(atr < ATR_MinFilter) return 0;
 
+   bool bullH4, bearH4;
+   if(!H4Trend(bullH4, bearH4)) return 0;
+
    double atrH1 = ATR_H1();
    if(atrH1 <= 0) return 0;
-
-   // H4 trend
-   int h4 = iMA(gSym, PERIOD_H4, H4_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-   if(h4 == INVALID_HANDLE) return 0;
-   double e4[];
-   ArraySetAsSeries(e4, true);
-   if(CopyBuffer(h4, 0, 1, 2, e4) < 1) { IndicatorRelease(h4); return 0; }
-   IndicatorRelease(h4);
-   double c4 = iClose(gSym, PERIOD_H4, 1);
-   bool bullH4 = c4 > e4[0];
-   bool bearH4 = c4 < e4[0];
-
-   // H1 pullback zone
    int h1e = iMA(gSym, PERIOD_H1, H1_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    if(h1e == INVALID_HANDLE) return 0;
    double e1[];
@@ -354,30 +451,11 @@ int GetSignal()
    bool priceAbove = c1h > e1[0];
    bool priceBelow = c1h < e1[0];
 
-   // ADX H1
-   int adxH = iADX(gSym, PERIOD_H1, ADX_Period);
-   if(adxH == INVALID_HANDLE) return 0;
-   double adx[];
-   ArraySetAsSeries(adx, true);
-   if(CopyBuffer(adxH, 0, 1, 2, adx) < 2) { IndicatorRelease(adxH); return 0; }
-   IndicatorRelease(adxH);
-   if(adx[0] < ADX_Min) return 0;
+   double adxH1 = GetADXValue(PERIOD_H1);
+   if(UseADXFilter && adxH1 < ADX_MinLevel) return 0;
 
-   // M5 EMA + RSI cross
-   int emaF = iMA(gSym, PERIOD_M5, M5_EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
-   int emaS = iMA(gSym, PERIOD_M5, M5_EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
-   int rsiH = iRSI(gSym, PERIOD_M5, M5_RSI_Period, PRICE_CLOSE);
-   if(emaF == INVALID_HANDLE || emaS == INVALID_HANDLE || rsiH == INVALID_HANDLE) return 0;
    double bf[], bs[], r[];
-   ArraySetAsSeries(bf, true);
-   ArraySetAsSeries(bs, true);
-   ArraySetAsSeries(r, true);
-   if(CopyBuffer(emaF, 0, 1, 2, bf) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return 0; }
-   if(CopyBuffer(emaS, 0, 1, 2, bs) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return 0; }
-   if(CopyBuffer(rsiH, 0, 1, 2, r) < 2) { IndicatorRelease(emaF); IndicatorRelease(emaS); IndicatorRelease(rsiH); return 0; }
-   IndicatorRelease(emaF);
-   IndicatorRelease(emaS);
-   IndicatorRelease(rsiH);
+   if(!LoadM5Core(bf, bs, r)) return 0;
 
    bool crossUp = (r[1] < M5_RSI_Neutral && r[0] >= M5_RSI_Neutral);
    bool crossDn = (r[1] > M5_RSI_Neutral && r[0] <= M5_RSI_Neutral);
@@ -385,6 +463,89 @@ int GetSignal()
    if(bullH4 && priceAbove && bf[0] > bs[0] && crossUp && IsBullM5()) return 1;
    if(bearH4 && priceBelow && bf[0] < bs[0] && crossDn && IsBearM5()) return -1;
    return 0;
+}
+
+//+------------------------------------------------------------------+
+int GetSignalModerate()
+{
+   double atr = ATRValue();
+   if(atr < ATR_MinFilter) return 0;
+
+   bool bullH4, bearH4;
+   if(!H4Trend(bullH4, bearH4)) return 0;
+
+   if(UseH1PullbackFilter)
+   {
+      if(bullH4 && !H1PullbackOk(true)) return 0;
+      if(bearH4 && !H1PullbackOk(false)) return 0;
+   }
+
+   double adxV = GetADXValue(ADX_Timeframe);
+   if(UseADXFilter && adxV < ADX_MinLevel) return 0;
+
+   double bf[], bs[], r[];
+   if(!LoadM5Core(bf, bs, r)) return 0;
+
+   bool crossUp = (r[1] < M5_RSI_Neutral && r[0] >= M5_RSI_Neutral);
+   bool crossDn = (r[1] > M5_RSI_Neutral && r[0] <= M5_RSI_Neutral);
+   bool rsiSlopeBuy  = (r[0] > 40.0 && r[0] < 62.0 && r[0] > r[1]);
+   bool rsiSlopeSell = (r[0] > 38.0 && r[0] < 60.0 && r[0] < r[1]);
+
+   if(bullH4 && bf[0] > bs[0] && (crossUp || rsiSlopeBuy))
+   {
+      if(RequireM5CandlePattern && !IsBullM5()) return 0;
+      return 1;
+   }
+   if(bearH4 && bf[0] < bs[0] && (crossDn || rsiSlopeSell))
+   {
+      if(RequireM5CandlePattern && !IsBearM5()) return 0;
+      return -1;
+   }
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+int GetSignalFrequent()
+{
+   double atr = ATRValue();
+   if(atr < ATR_MinFilter) return 0;
+
+   bool bullH4, bearH4;
+   if(!H4Trend(bullH4, bearH4)) return 0;
+
+   double adxV = GetADXValue(ADX_Timeframe);
+   if(UseADXFilter && adxV < ADX_MinLevel * 0.85) return 0;
+
+   double bf[], bs[], r[];
+   if(!LoadM5Core(bf, bs, r)) return 0;
+
+   bool crossBuy  = (bf[1] <= bs[1] && bf[0] > bs[0]);
+   bool crossSell = (bf[1] >= bs[1] && bf[0] < bs[0]);
+
+   if(bullH4 && crossBuy && r[0] > 38.0 && r[0] < 68.0)
+   {
+      if(RequireM5CandlePattern && !IsBullM5()) return 0;
+      return 1;
+   }
+   if(bearH4 && crossSell && r[0] > 32.0 && r[0] < 62.0)
+   {
+      if(RequireM5CandlePattern && !IsBearM5()) return 0;
+      return -1;
+   }
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+// Return 1 = buy, -1 = sell, 0 = none
+int GetSignal()
+{
+   switch(SignalProfile)
+   {
+      case PROFILE_STRICT:        return GetSignalStrict();
+      case PROFILE_M5_FREQUENT:   return GetSignalFrequent();
+      case PROFILE_M5_MODERATE:
+      default:                    return GetSignalModerate();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -551,14 +712,22 @@ void OpenPosition(int dir)
       double sl = NormalizeDouble(ask - slDist, dg);
       double tp = NormalizeDouble(ask + atr * ATR_TP_Far_Multi, dg);
       if(trade.Buy(lot, gSym, ask, sl, tp, "XAU_Unified_BUY"))
+      {
+         gLastEntryM5BarTime = iTime(gSym, PERIOD_M5, 0);
+         gTradesToday++;
          Print("XAU_Unified BUY lot=", lot, " SL=", sl, " TP=", tp);
+      }
    }
    else
    {
       double sl = NormalizeDouble(bid + slDist, dg);
       double tp = NormalizeDouble(bid - atr * ATR_TP_Far_Multi, dg);
       if(trade.Sell(lot, gSym, bid, sl, tp, "XAU_Unified_SELL"))
+      {
+         gLastEntryM5BarTime = iTime(gSym, PERIOD_M5, 0);
+         gTradesToday++;
          Print("XAU_Unified SELL lot=", lot, " SL=", sl, " TP=", tp);
+      }
    }
 }
 
@@ -579,7 +748,8 @@ int OnInit()
    gBaselineSpread = (double)SymbolInfoInteger(gSym, SYMBOL_SPREAD);
    LoadState();
 
-   Print("XAU_Unified_v1 ON | ", gSym, " | baseline spread=", gBaselineSpread);
+   Print("XAU_Unified_v1.01 | ", gSym, " | profile=", (int)SignalProfile,
+         " | baseline spread=", gBaselineSpread);
    return INIT_SUCCEEDED;
 }
 
@@ -589,6 +759,7 @@ void OnDeinit(const int reason) {}
 void OnTick()
 {
    CheckDailyLoss();
+   BumpTradeDayIfNeeded();
    ManageOpenPositions();
 
    if(gDailyPaused) return;
@@ -597,9 +768,13 @@ void OnTick()
    if(!SpreadOK()) return;
    if(CountOurPositions() >= MaxOpenPositions) return;
 
+   if(MaxTradesPerDay > 0 && gTradesToday >= MaxTradesPerDay) return;
+
    datetime m5 = iTime(gSym, PERIOD_M5, 0);
    if(m5 == gLastM5Bar) return;
    gLastM5Bar = m5;
+
+   if(!EntryCooldownOk()) return;
 
    int sig = GetSignal();
    if(sig == 0) return;
