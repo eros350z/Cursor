@@ -5,8 +5,8 @@
 //|  Trade mgmt: partial take-profit (ATR) + breakeven + ATR trail   |
 //+------------------------------------------------------------------+
 #property copyright "XAU Unified"
-#property version   "1.01"
-#property description "XAUUSD unified EA — M5 profiles + partial + BE + trail"
+#property version   "1.02"
+#property description "XAUUSD unified EA — M5 profiles + BE + trail; partials only if lot allows"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -111,6 +111,7 @@ struct TradeState
    bool     tp2;
    bool     tp3;
    bool     beDone;
+   bool     loggedPartialSkip;
 };
 
 TradeState gStates[];
@@ -127,6 +128,7 @@ int StateIndex(ulong ticket)
    gStates[n].tp2 = false;
    gStates[n].tp3 = false;
    gStates[n].beDone = false;
+   gStates[n].loggedPartialSkip = false;
    return n;
 }
 
@@ -561,6 +563,18 @@ int CountOurPositions()
 }
 
 //+------------------------------------------------------------------+
+// True if broker min/step allows closing `pct`% of `totalVol` as a separate volume.
+bool PartialCloseIsExecutable(double totalVol, double pct)
+{
+   double step = SymbolInfoDouble(gSym, SYMBOL_VOLUME_STEP);
+   double minL = SymbolInfoDouble(gSym, SYMBOL_VOLUME_MIN);
+   if(step <= 0.0 || minL <= 0.0 || totalVol < minL) return false;
+   double v = MathFloor((totalVol * pct / 100.0) / step) * step;
+   if(v < minL) return false;
+   if(v >= totalVol) v = MathFloor((totalVol - minL) / step) * step;
+   return (v >= minL);
+}
+
 void PartialCloseVol(ulong ticket, double pct, double curVol)
 {
    double step = SymbolInfoDouble(gSym, SYMBOL_VOLUME_STEP);
@@ -623,7 +637,15 @@ void ManageOpenPositions()
 
       if(profPrice >= t1 && !gStates[ix].tp1)
       {
-         PartialCloseVol(ticket, TP1_ClosePct, vol);
+         if(PartialCloseIsExecutable(vol, TP1_ClosePct))
+            PartialCloseVol(ticket, TP1_ClosePct, vol);
+         else if(!gStates[ix].loggedPartialSkip)
+         {
+            gStates[ix].loggedPartialSkip = true;
+            Print("XAU_Unified: partial skipped (volume step/min lot) | ticket=", ticket,
+                  " vol=", vol, " min=", SymbolInfoDouble(gSym, SYMBOL_VOLUME_MIN),
+                  " — milestones BE/trail still apply.");
+         }
          gStates[ix].tp1 = true;
          if(MoveBE_AfterTP1)
          {
@@ -652,7 +674,8 @@ void ManageOpenPositions()
 
       if(profPrice >= t2 && !gStates[ix].tp2)
       {
-         PartialCloseVol(ticket, TP2_ClosePct, vol);
+         if(PartialCloseIsExecutable(vol, TP2_ClosePct))
+            PartialCloseVol(ticket, TP2_ClosePct, vol);
          gStates[ix].tp2 = true;
       }
 
@@ -666,7 +689,8 @@ void ManageOpenPositions()
 
       if(profPrice >= t3 && !gStates[ix].tp3)
       {
-         PartialCloseVol(ticket, TP3_ClosePct, vol);
+         if(PartialCloseIsExecutable(vol, TP3_ClosePct))
+            PartialCloseVol(ticket, TP3_ClosePct, vol);
          gStates[ix].tp3 = true;
       }
 
@@ -748,8 +772,13 @@ int OnInit()
    gBaselineSpread = (double)SymbolInfoInteger(gSym, SYMBOL_SPREAD);
    LoadState();
 
-   Print("XAU_Unified_v1.01 | ", gSym, " | profile=", (int)SignalProfile,
-         " | baseline spread=", gBaselineSpread);
+   MqlDateTime gt;
+   TimeToStruct(TimeGMT(), gt);
+   string mm = (gt.min < 10) ? ("0" + IntegerToString(gt.min)) : IntegerToString(gt.min);
+   Print("XAU_Unified_v1.02 | ", gSym, " | profile=", (int)SignalProfile,
+         " | baseline spread=", gBaselineSpread,
+         " | Session/News/Friday use MT5 TimeGMT() (not VPS OS clock). GMT now: ",
+         IntegerToString(gt.hour), ":", mm);
    return INIT_SUCCEEDED;
 }
 
