@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#000005" />
+  <meta name="description" content="VOID RUNNER — An infinite dimension-shifting mobile runner game." />
+  <title>VOID RUNNER</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div id="game-container">
+
+  <!-- ─── Canvas ─────────────────────────────────────── -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ─── Start Screen ──────────────────────────────── -->
+  <div id="start-screen" class="screen">
+    <div class="logo-wrapper">
+      <div class="logo-title">VOID RUNNER</div>
+      <div class="logo-sub">Dimension Shift</div>
+    </div>
+
+    <div class="dimension-badges">
+      <div class="dim-badge d0">
+        <span class="icon">⚡</span>
+        <span class="label">CYBER</span>
+      </div>
+      <div class="dim-badge d1">
+        <span class="icon">🌀</span>
+        <span class="label">VOID</span>
+      </div>
+      <div class="dim-badge d2">
+        <span class="icon">✦</span>
+        <span class="label">FLUX</span>
+      </div>
+    </div>
+
+    <div class="best-score-display" id="best-score-display">BEST <span>0</span></div>
+
+    <button class="btn-start" id="btn-start">PLAY NOW</button>
+
+    <div class="controls-hint">
+      <div class="control-row">
+        <div class="control-item">
+          <span class="key">↑ / SPACE</span>
+          <span>Jump</span>
+        </div>
+        <div class="control-item">
+          <span class="key">← →</span>
+          <span>Shift Dimension</span>
+        </div>
+        <div class="control-item">
+          <span class="key">↓</span>
+          <span>Dash</span>
+        </div>
+      </div>
+      <div class="control-row">
+        <div class="control-item" style="color:rgba(255,255,255,0.3); font-size:0.65rem;">
+          📱 Swipe UP/DOWN/LEFT/RIGHT &nbsp;·&nbsp; Double-tap to Dash
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── HUD ────────────────────────────────────────── -->
+  <div id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-label">SCORE</div>
+      <div class="hud-score" id="hud-score">0</div>
+      <div class="hud-multiplier" id="hud-multiplier"></div>
+      <div class="hud-combo" id="hud-combo"></div>
+    </div>
+
+    <div class="hud-right">
+      <div class="dimension-indicator">
+        <div class="dim-dots">
+          <div class="dim-dot" id="dot-0"></div>
+          <div class="dim-dot" id="dot-1"></div>
+          <div class="dim-dot" id="dot-2"></div>
+        </div>
+        <div class="dim-name" id="dim-name">CYBER</div>
+      </div>
+      <div class="dash-charges" id="dash-charges"></div>
+    </div>
+  </div>
+
+  <!-- ─── Safe-dim hint bar ─────────────────────────── -->
+  <div id="hint-bar" style="
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: rgba(0,0,0,0.5);
+    border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.1);
+    pointer-events: none;
+    z-index: 6;
+    opacity: 0;
+    transition: opacity 0.3s;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    color: rgba(255,255,255,0.5);
+  ">
+    <span id="hint-text">SHIFT TO</span>
+    <span id="hint-dim" style="font-weight:800; letter-spacing:0.15em;"></span>
+  </div>
+
+  <!-- ─── Pause Button ──────────────────────────────── -->
+  <div id="pause-btn" class="hidden">⏸</div>
+
+  <!-- ─── Mute Button ───────────────────────────────── -->
+  <button id="btn-mute" style="
+    position: absolute;
+    top: env(safe-area-inset-top, 16px);
+    right: 16px;
+    width: 38px;
+    height: 38px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 50%;
+    color: white;
+    font-size: 1rem;
+    cursor: pointer;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+  ">🔊</button>
+
+  <!-- ─── Game Over Screen ──────────────────────────── -->
+  <div id="gameover-screen" class="screen hidden">
+    <div class="gameover-title">GAME OVER</div>
+    <div class="gameover-subtitle">THE VOID CLAIMS YOU</div>
+
+    <div class="score-panel">
+      <div class="score-row">
+        <span class="score-row-label">SCORE</span>
+        <span class="score-row-value" id="go-score">0</span>
+      </div>
+      <div class="score-row">
+        <span class="score-row-label">BEST</span>
+        <span class="score-row-value" id="go-best">
+          0
+          <span id="new-best-badge" class="new-best-badge" style="display:none;">NEW</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="gameover-buttons">
+      <button class="btn-play-again" id="btn-play-again">PLAY AGAIN</button>
+      <button class="btn-menu" id="btn-menu">MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- ─── Pause Screen ──────────────────────────────── -->
+  <div id="pause-screen" class="screen hidden">
+    <div class="pause-title">PAUSED</div>
+    <div class="gameover-buttons">
+      <button class="btn-play-again" id="btn-pause-resume">RESUME</button>
+      <button class="btn-menu" id="btn-pause-menu">MAIN MENU</button>
+    </div>
+  </div>
+
+</div>
+
+<script type="module">
+  import { GameEngine } from './src/engine.js';
+  import { UIManager } from './src/ui.js';
+
+  const canvas = document.getElementById('game-canvas');
+  const engine = new GameEngine();
+  const ui = new UIManager(engine);
+
+  engine.ui = ui;
+  await engine.init(canvas, ui);
+
+  ui.showStart();
+</script>
+</body>
+</html>
