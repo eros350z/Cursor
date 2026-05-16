@@ -5,7 +5,7 @@
 //|  Trade mgmt: partial take-profit (ATR) + breakeven + ATR trail   |
 //+------------------------------------------------------------------+
 #property copyright "XAU Unified"
-#property version   "1.02"
+#property version   "1.03"
 #property description "XAUUSD unified EA — M5 profiles + BE + trail; partials only if lot allows"
 
 #include <Trade\Trade.mqh>
@@ -26,10 +26,14 @@ input group "=== Symbol ==="
 input string   TradeSymbol        = "XAUUSD";   // e.g. XAUUSD or XAUUSDm
 
 input group "=== Money ==="
-input double   RiskPercent        = 1.0;        // % balance risked at SL distance
-input double   MaxDailyLossPct    = 3.0;        // pause new trades + flat if hit
-input int      MaxOpenPositions   = 1;
-input double   MaxLotCap          = 5.0;        // hard cap (0 = no cap)
+input bool     RiskUsesEquity          = false;   // true = risk % on EQUITY, false = BALANCE
+input double   RiskPercent             = 1.0;    // % capital risked at SL (baseline sizing)
+input double   MaxRiskPercentCap       = 8.0;    // max % of capital as $ loss at SL (>= Risk% to allow min-lot bump)
+input bool     AutoRaiseLotForPartials = true;   // raise lot toward MinLotForPartialExec if cap allows
+input double   MinLotForPartialExec    = 0.04;    // target min lot for first ~30% partial (step/min 0.01)
+input double   MaxDailyLossPct       = 3.0;     // pause new trades + flat if hit
+input int      MaxOpenPositions        = 1;
+input double   MaxLotCap               = 5.0;     // hard cap (0 = no cap)
 
 input group "=== ATR (M15) — distances ==="
 input int      ATR_Period         = 14;
@@ -292,26 +296,87 @@ void CheckDailyLoss()
 }
 
 //+------------------------------------------------------------------+
-double CalcLot(double slDistancePrice)
+double AccountCapitalForRisk()
 {
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskAmt = balance * RiskPercent / 100.0;
+   return RiskUsesEquity ? AccountInfoDouble(ACCOUNT_EQUITY) : AccountInfoDouble(ACCOUNT_BALANCE);
+}
+
+//+------------------------------------------------------------------+
+// Money loss at SL for exactly 1.0 lot (used to scale lot from $ risk budget).
+double DollarLossPerLotAtSL(double slDistancePrice)
+{
    double tv = SymbolInfoDouble(gSym, SYMBOL_TRADE_TICK_VALUE);
    double ts = SymbolInfoDouble(gSym, SYMBOL_TRADE_TICK_SIZE);
    double pt = SymbolInfoDouble(gSym, SYMBOL_POINT);
+   if(slDistancePrice <= 0 || tv <= 0 || ts <= 0 || pt <= 0) return 0;
+   double slPoints = slDistancePrice / pt;
+   return slPoints * pt / ts * tv;
+}
+
+//+------------------------------------------------------------------+
+double CalcLotForRiskPercent(double capitalMoney, double riskPct, double slDistancePrice)
+{
    double minLot = SymbolInfoDouble(gSym, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(gSym, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(gSym, SYMBOL_VOLUME_STEP);
-   if(slDistancePrice <= 0 || tv <= 0 || ts <= 0 || pt <= 0) return minLot;
+   double step   = SymbolInfoDouble(gSym, SYMBOL_VOLUME_STEP);
+   if(capitalMoney <= 0) return minLot;
 
-   double slPoints = slDistancePrice / pt;
-   double lossPerLot = slPoints * pt / ts * tv;
+   double riskAmt    = capitalMoney * riskPct / 100.0;
+   double lossPerLot = DollarLossPerLotAtSL(slDistancePrice);
    if(lossPerLot <= 0) return minLot;
+
    double lot = riskAmt / lossPerLot;
    lot = MathFloor(lot / step) * step;
    lot = MathMax(minLot, MathMin(maxLot, lot));
    if(MaxLotCap > 0) lot = MathMin(lot, MaxLotCap);
    return NormalizeDouble(lot, 2);
+}
+
+//+------------------------------------------------------------------+
+// Baseline lot from RiskPercent only (no partial bump).
+double CalcLot(double slDistancePrice)
+{
+   return CalcLotForRiskPercent(AccountCapitalForRisk(), RiskPercent, slDistancePrice);
+}
+
+//+------------------------------------------------------------------+
+// Final lot: may raise toward MinLotForPartialExec if $ risk at SL stays under MaxRiskPercentCap.
+double ComputeEntryLot(double slDistancePrice)
+{
+   double cap = AccountCapitalForRisk();
+   double lotR = CalcLotForRiskPercent(cap, RiskPercent, slDistancePrice);
+
+   if(!AutoRaiseLotForPartials || MinLotForPartialExec <= 0)
+      return lotR;
+
+   double minLot = SymbolInfoDouble(gSym, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(gSym, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(gSym, SYMBOL_VOLUME_STEP);
+   if(step <= 0) return lotR;
+
+   double lotMin = MathMax(minLot, MathFloor(MinLotForPartialExec / step + 1e-8) * step);
+   lotMin = MathMin(lotMin, maxLot);
+   if(MaxLotCap > 0) lotMin = MathMin(lotMin, MaxLotCap);
+
+   if(lotR >= lotMin)
+      return lotR;
+
+   double lossPerLot = DollarLossPerLotAtSL(slDistancePrice);
+   if(lossPerLot <= 0) return lotR;
+
+   double maxRiskPct = MathMax(MaxRiskPercentCap, RiskPercent);
+   double maxRiskUSD = cap * maxRiskPct / 100.0;
+   double riskAtMin  = lossPerLot * lotMin;
+
+   if(riskAtMin <= maxRiskUSD + 1e-6)
+   {
+      Print("XAU_Unified: lot raised ", lotR, " -> ", lotMin,
+            " for partial feasibility | est $ risk at SL≈", DoubleToString(riskAtMin, 2),
+            " cap≈", DoubleToString(maxRiskUSD, 2), " (", DoubleToString(maxRiskPct, 1), "%)");
+      return NormalizeDouble(lotMin, 2);
+   }
+
+   return lotR;
 }
 
 //+------------------------------------------------------------------+
@@ -729,7 +794,7 @@ void OpenPosition(int dir)
    double ask = SymbolInfoDouble(gSym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(gSym, SYMBOL_BID);
    double slDist = atr * ATR_SL_Multi;
-   double lot = CalcLot(slDist);
+   double lot = ComputeEntryLot(slDist);
 
    if(dir == 1)
    {
@@ -775,7 +840,7 @@ int OnInit()
    MqlDateTime gt;
    TimeToStruct(TimeGMT(), gt);
    string mm = (gt.min < 10) ? ("0" + IntegerToString(gt.min)) : IntegerToString(gt.min);
-   Print("XAU_Unified_v1.02 | ", gSym, " | profile=", (int)SignalProfile,
+   Print("XAU_Unified_v1.03 | ", gSym, " | profile=", (int)SignalProfile,
          " | baseline spread=", gBaselineSpread,
          " | Session/News/Friday use MT5 TimeGMT() (not VPS OS clock). GMT now: ",
          IntegerToString(gt.hour), ":", mm);
