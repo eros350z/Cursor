@@ -19,8 +19,8 @@
 //|     الـ 20% الأخيرة تبقى حتى يوقفها الـ Trailing                |
 //|  5. نظام Volatility Regime تلقائي                                |
 //+------------------------------------------------------------------+
-#property copyright "Crypto SMT Pro v1.0"
-#property version   "1.00"
+#property copyright "Crypto SMT Pro v1.1"
+#property version   "1.10"
 #property description "BTCUSD+ETHUSD | SMT Divergence | 4-Phase Profit | Adaptive Trailing"
 #property strict
 
@@ -63,7 +63,8 @@ input group "=== فلاتر الترند ==="
 input int      EMA_Trend_Period  = 200;        // EMA الترند H4
 input int      EMA_Entry_Period  = 21;         // EMA الدخول H1
 input int      ADX_Period        = 14;         // فترة ADX
-input double   ADX_Min           = 20.0;       // ADX أدنى للدخول
+input double   ADX_Min           = 15.0;       // ADX أدنى للدخول
+input bool     UseTrendFilter    = false;      // فلتر EMA200 H4 (false=معطّل - الأفضل للكريبتو)
 
 input group "=== فلتر نسبة ETH/BTC (Leading Indicator) ==="
 input bool     UseRatioFilter    = true;       // تفعيل فلتر نسبة ETH/BTC
@@ -92,6 +93,7 @@ input bool     AvoidVolSpike     = true;       // تجنب الدخول عند A
 input group "=== إعدادات EA ==="
 input int      MagicNumber       = 20260515;
 input int      Slippage          = 300;        // تمرير للكريبتو (≈3$)
+input bool     DebugMode         = true;       // طباعة تفاصيل الفحص كل شمعة
 
 //+------------------------------------------------------------------+
 //|                      GLOBAL VARIABLES                            |
@@ -169,7 +171,7 @@ int OnInit() {
    CreateDashboard();
 
    Print("=========================================================");
-   Print(" CRYPTO SMT PRO v1.0 - STARTED");
+   Print(" CRYPTO SMT PRO v1.1 - STARTED");
    Print(" BTC: ", Sym_BTC, "  |  ETH: ", Sym_ETH, "  |  Trading: ", Sym_Trade);
    Print(" Risk: ", RiskPercent, "%  |  SL: ", ATR_SL_Multi, "×ATR");
    Print(" SMT: SwingBars=", SwingBars, "  LookBack=", SMT_LookBack, "  MinDiv=", MinDivPct, "%");
@@ -270,26 +272,41 @@ void OnTick() {
 //|   → Smart money trapped bulls on BTC → drop expected            |
 //+------------------------------------------------------------------+
 int GetSMTSignal() {
-   // --- Filter 1: H4 EMA200 Trend ---
-   double btcTrEMA[], ethTrEMA[];
-   ArraySetAsSeries(btcTrEMA, true);
-   ArraySetAsSeries(ethTrEMA, true);
-   if(CopyBuffer(h_EMA_Trend_BTC, 0, 0, 3, btcTrEMA) < 3) return 0;
-   if(CopyBuffer(h_EMA_Trend_ETH, 0, 0, 3, ethTrEMA) < 3) return 0;
+   // --- Filter 1: H4 EMA200 Trend (optional) ---
+   bool btcBull = true, btcBear = true;
+   bool ethBull = true, ethBear = true;
 
-   double btcH4Close = iClose(Sym_BTC, TF_Trend, 1);
-   double ethH4Close = iClose(Sym_ETH, TF_Trend, 1);
+   if(UseTrendFilter) {
+      double btcTrEMA[], ethTrEMA[];
+      ArraySetAsSeries(btcTrEMA, true);
+      ArraySetAsSeries(ethTrEMA, true);
+      if(CopyBuffer(h_EMA_Trend_BTC, 0, 0, 3, btcTrEMA) < 3) return 0;
+      if(CopyBuffer(h_EMA_Trend_ETH, 0, 0, 3, ethTrEMA) < 3) return 0;
 
-   bool btcBull = (btcH4Close > btcTrEMA[0]);
-   bool btcBear = (btcH4Close < btcTrEMA[0]);
-   bool ethBull = (ethH4Close > ethTrEMA[0]);
-   bool ethBear = (ethH4Close < ethTrEMA[0]);
+      double btcH4Close = iClose(Sym_BTC, TF_Trend, 1);
+      double ethH4Close = iClose(Sym_ETH, TF_Trend, 1);
+
+      btcBull = (btcH4Close > btcTrEMA[0]);
+      btcBear = (btcH4Close < btcTrEMA[0]);
+      ethBull = (ethH4Close > ethTrEMA[0]);
+      ethBear = (ethH4Close < ethTrEMA[0]);
+
+      if(DebugMode)
+         Print("DEBUG Trend | BTC H4: ", DoubleToString(btcH4Close, 0),
+               " vs EMA200: ", DoubleToString(btcTrEMA[0], 0),
+               " | Bull:", btcBull, " Bear:", btcBear,
+               " | ETH Bull:", ethBull, " Bear:", ethBear);
+   }
 
    // --- Filter 2: ADX momentum ---
    double adxBuf[];
    ArraySetAsSeries(adxBuf, true);
    if(CopyBuffer(h_ADX, 0, 0, 3, adxBuf) < 3) return 0;
    bool adxOK = (adxBuf[0] >= ADX_Min);
+
+   if(DebugMode && !adxOK)
+      Print("DEBUG ADX blocked | ADX=", DoubleToString(adxBuf[0], 1),
+            " < Min=", ADX_Min);
 
    // --- Filter 3: H1 EMA21 context ---
    double emaEntry[];
@@ -333,28 +350,36 @@ int GetSMTSignal() {
       }
    }
 
+   if(DebugMode)
+      Print("DEBUG Swings | BTC Lows: ", DoubleToString(btcLow1, 0), "/", DoubleToString(btcLow2, 0),
+            "  ETH Lows: ", DoubleToString(ethLow1, 2), "/", DoubleToString(ethLow2, 2),
+            "  BTC Highs: ", DoubleToString(btcHigh1, 0), "/", DoubleToString(btcHigh2, 0),
+            "  ADX: ", DoubleToString(adxBuf[0], 1));
+
    // ============================================================
    // BULLISH SMT
    // BTC: newer low < older low  (Lower Low)
    // ETH: at BTC low1 bar, ETH was HIGHER than at BTC low2 bar
-   // → Divergence = smart money defending ETH while BTC fakes lower
    // ============================================================
    if(btcLow1 > 0 && btcLow2 > 0 && ethLow1 > 0 && ethLow2 > 0) {
       bool btcLowerLow  = (btcLow1 < btcLow2);
       bool ethHigherLow = (ethLow1 > ethLow2);
       double divPct     = MathAbs(btcLow1 - btcLow2) / btcLow2 * 100.0;
 
+      if(DebugMode)
+         Print("DEBUG BULL | btcLL=", btcLowerLow, " ethHL=", ethHigherLow,
+               " Div=", DoubleToString(divPct, 2), "%(min:", MinDivPct, ")",
+               " adxOK=", adxOK,
+               " trendOK=", (btcBull || ethBull));
+
       if(btcLowerLow && ethHigherLow && divPct >= MinDivPct) {
          bool trendOK = (btcBull || ethBull);
-         // Price should still be near EMA21 (not already far from it)
-         bool priceOK = (tradeClose > emaEntry[1] * 0.992);
-
-         if(trendOK && adxOK && priceOK) {
-            Print("BULLISH SMT | BTC Lows: ", DoubleToString(btcLow1, 0),
+         if(trendOK && adxOK) {
+            Print("BULLISH SMT SIGNAL | BTC Lows: ", DoubleToString(btcLow1, 0),
                   " < ", DoubleToString(btcLow2, 0),
-                  "  |  ETH Lows: ", DoubleToString(ethLow1, 2),
+                  "  ETH Lows: ", DoubleToString(ethLow1, 2),
                   " > ", DoubleToString(ethLow2, 2),
-                  "  |  Div: ", DoubleToString(divPct, 2), "%");
+                  "  Div: ", DoubleToString(divPct, 2), "%");
             return 1;
          }
       }
@@ -364,23 +389,26 @@ int GetSMTSignal() {
    // BEARISH SMT
    // BTC: newer high > older high  (Higher High)
    // ETH: at BTC high1 bar, ETH was LOWER than at BTC high2 bar
-   // → Divergence = smart money distributing on BTC while ETH fails
    // ============================================================
    if(btcHigh1 > 0 && btcHigh2 > 0 && ethHigh1 > 0 && ethHigh2 > 0) {
       bool btcHigherHigh = (btcHigh1 > btcHigh2);
       bool ethLowerHigh  = (ethHigh1 < ethHigh2);
       double divPct      = MathAbs(btcHigh1 - btcHigh2) / btcHigh2 * 100.0;
 
+      if(DebugMode)
+         Print("DEBUG BEAR | btcHH=", btcHigherHigh, " ethLH=", ethLowerHigh,
+               " Div=", DoubleToString(divPct, 2), "%(min:", MinDivPct, ")",
+               " adxOK=", adxOK,
+               " trendOK=", (btcBear || ethBear));
+
       if(btcHigherHigh && ethLowerHigh && divPct >= MinDivPct) {
          bool trendOK = (btcBear || ethBear);
-         bool priceOK = (tradeClose < emaEntry[1] * 1.008);
-
-         if(trendOK && adxOK && priceOK) {
-            Print("BEARISH SMT | BTC Highs: ", DoubleToString(btcHigh1, 0),
+         if(trendOK && adxOK) {
+            Print("BEARISH SMT SIGNAL | BTC Highs: ", DoubleToString(btcHigh1, 0),
                   " > ", DoubleToString(btcHigh2, 0),
-                  "  |  ETH Highs: ", DoubleToString(ethHigh1, 2),
+                  "  ETH Highs: ", DoubleToString(ethHigh1, 2),
                   " < ", DoubleToString(ethHigh2, 2),
-                  "  |  Div: ", DoubleToString(divPct, 2), "%");
+                  "  Div: ", DoubleToString(divPct, 2), "%");
             return -1;
          }
       }
@@ -451,8 +479,8 @@ int GetVolatilityRegime() {
 double GetSwingHigh(string symbol, ENUM_TIMEFRAMES tf, int shift) {
    double high = iHigh(symbol, tf, shift);
    for(int i = 1; i <= SwingBars; i++) {
-      if(iHigh(symbol, tf, shift + i) >= high) return 0;
-      if(iHigh(symbol, tf, shift - i) >= high) return 0;
+      if(iHigh(symbol, tf, shift + i) > high) return 0;
+      if(iHigh(symbol, tf, shift - i) > high) return 0;
    }
    return high;
 }
@@ -460,8 +488,8 @@ double GetSwingHigh(string symbol, ENUM_TIMEFRAMES tf, int shift) {
 double GetSwingLow(string symbol, ENUM_TIMEFRAMES tf, int shift) {
    double low = iLow(symbol, tf, shift);
    for(int i = 1; i <= SwingBars; i++) {
-      if(iLow(symbol, tf, shift + i) <= low) return 0;
-      if(iLow(symbol, tf, shift - i) <= low) return 0;
+      if(iLow(symbol, tf, shift + i) < low) return 0;
+      if(iLow(symbol, tf, shift - i) < low) return 0;
    }
    return low;
 }
