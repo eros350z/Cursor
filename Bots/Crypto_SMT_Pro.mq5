@@ -19,8 +19,8 @@
 //|     الـ 20% الأخيرة تبقى حتى يوقفها الـ Trailing                |
 //|  5. نظام Volatility Regime تلقائي                                |
 //+------------------------------------------------------------------+
-#property copyright "Crypto SMT Pro v1.1"
-#property version   "1.10"
+#property copyright "Crypto SMT Pro v1.2"
+#property version   "1.20"
 #property description "BTCUSD+ETHUSD | SMT Divergence | 4-Phase Profit | Adaptive Trailing"
 #property strict
 
@@ -55,9 +55,9 @@ input double   VolLow_Ratio      = 0.6;        // Low Vol: ATR < متوسط × 0
 input double   VolSpike_Ratio    = 2.5;        // Spike: ATR > متوسط × 2.5 → تجنب
 
 input group "=== SMT Divergence ==="
-input int      SwingBars         = 8;          // أشرطة Swing من كل جانب
-input int      SMT_LookBack      = 60;         // البحث في آخر X شمعة H1
-input double   MinDivPct         = 0.20;       // أدنى انحراف % للـ SMT
+input int      SwingBars         = 3;          // أشرطة Swing من كل جانب
+input int      SMT_LookBack      = 100;        // البحث في آخر X شمعة H1
+input double   MinDivPct         = 0.10;       // أدنى انحراف % للـ SMT
 
 input group "=== فلاتر الترند ==="
 input int      EMA_Trend_Period  = 200;        // EMA الترند H4
@@ -171,7 +171,7 @@ int OnInit() {
    CreateDashboard();
 
    Print("=========================================================");
-   Print(" CRYPTO SMT PRO v1.1 - STARTED");
+   Print(" CRYPTO SMT PRO v1.2 - STARTED");
    Print(" BTC: ", Sym_BTC, "  |  ETH: ", Sym_ETH, "  |  Trading: ", Sym_Trade);
    Print(" Risk: ", RiskPercent, "%  |  SL: ", ATR_SL_Multi, "×ATR");
    Print(" SMT: SwingBars=", SwingBars, "  LookBack=", SMT_LookBack, "  MinDiv=", MinDivPct, "%");
@@ -354,7 +354,14 @@ int GetSMTSignal() {
       Print("DEBUG Swings | BTC Lows: ", DoubleToString(btcLow1, 0), "/", DoubleToString(btcLow2, 0),
             "  ETH Lows: ", DoubleToString(ethLow1, 2), "/", DoubleToString(ethLow2, 2),
             "  BTC Highs: ", DoubleToString(btcHigh1, 0), "/", DoubleToString(btcHigh2, 0),
+            "  ETH Highs: ", DoubleToString(ethHigh1, 2), "/", DoubleToString(ethHigh2, 2),
             "  ADX: ", DoubleToString(adxBuf[0], 1));
+
+   // تحذير: لو ما لقى نقطتين swing
+   if(DebugMode) {
+      if(btcLow2 == 0)  Print("DEBUG WARNING: BTC Low2 not found - increase SMT_LookBack or reduce SwingBars");
+      if(btcHigh2 == 0) Print("DEBUG WARNING: BTC High2 not found - increase SMT_LookBack or reduce SwingBars");
+   }
 
    // ============================================================
    // BULLISH SMT
