@@ -67,7 +67,7 @@ input double   ADX_Min           = 15.0;       // ADX أدنى للدخول
 input bool     UseTrendFilter    = false;      // فلتر EMA200 H4 (false=معطّل - الأفضل للكريبتو)
 
 input group "=== فلتر نسبة ETH/BTC (Leading Indicator) ==="
-input bool     UseRatioFilter    = true;       // تفعيل فلتر نسبة ETH/BTC
+input bool     UseRatioFilter    = false;      // تفعيل فلتر نسبة ETH/BTC
 input int      RatioBars         = 6;          // حساب تغير النسبة خلال X ساعات
 input double   RatioThreshold    = 0.30;       // حد الانحراف % لتأكيد الاتجاه
 
@@ -843,7 +843,7 @@ bool IsSundayOpen() {
 void CreateDashboard() {
    CreateBox(PRE + "BG", 10, 30, 310, 265, C'8, 12, 22', C'0, 150, 220');
 
-   CreateLabel(PRE + "TITLE",   "  CRYPTO SMT PRO  v1.0",   20, 40,  10, C'0, 200, 255');
+   CreateLabel(PRE + "TITLE",   "  CRYPTO SMT PRO  v1.2",   20, 40,  10, C'0, 200, 255');
    CreateLabel(PRE + "SUB",     Sym_BTC + " x " + Sym_ETH + "  |  24/7", 20, 58, 8, C'60, 110, 150');
    CreateLabel(PRE + "LINE1",   "────────────────────────────────", 20, 70, 8, C'15, 35, 55');
 
@@ -1063,7 +1063,7 @@ void OnChartEvent(const int id, const long& lparam,
                      (ratio == -1) ? "Risk-Off (SELL bias)"  : "Neutral";
 
    Print("╔══════════════════════════════════════════════╗");
-   Print("║       CRYPTO SMT PRO v1.0  -  STATUS         ║");
+   Print("║       CRYPTO SMT PRO v1.2  -  STATUS         ║");
    Print("╠══════════════════════════════════════════════╣");
    Print("║ Traded    : ", Sym_Trade, "  (BTC+ETH analysis)");
    Print("║ Balance   : $", DoubleToString(balance,  2));
